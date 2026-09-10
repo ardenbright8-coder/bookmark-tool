@@ -1,0 +1,6 @@
+# Caddy 反代 · 占位符版：ntfy.example.com 改成你的域名（与 server.yml 的 base-url 一致）
+# HTTPS 证书 Caddy 自动从 Let's Encrypt 签发续期，无需手动
+ntfy.example.com {
+	reverse_proxy ntfy:2586
+	# WebSocket / SSE 长连接 Caddy 默认支持流式转发，无需额外配置
+}

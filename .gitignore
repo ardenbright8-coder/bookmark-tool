@@ -1,0 +1,18 @@
+# 参考代码库（下下来的开源仓库，只借代码不进本项目Git）
+super-productivity/
+vikunja/
+
+# 安装包和旧改造产物（死物不进Git）
+安装包/
+改造版成品（绿色版·固定入口指这·每次打包覆盖）/
+
+# 凭证（🚨永不上传）
+通道（阿里云ntfy·部署与收信）/deploy/服务器信息（本地·不进git）.md
+
+# 运行产物
+node_modules/
+*.log
+caddy-data/
+caddy-config/
+cache/
+auth/

@@ -1,0 +1,20 @@
+# ntfy 服务端配置 · 占位符版（真值只进「服务器信息（本地·不进git）.md」）
+# 占位：ntfy.example.com（你的域名）——改完这行，Caddyfile 里的同名占位也要一起改
+
+base-url: "https://ntfy.example.com"
+listen-http: ":2586"
+
+# 消息缓存：SQLite 落盘，168h=7天（要更长改这里，如 720h=30天；改了同步更新手册）
+cache-file: "/var/cache/ntfy/cache.db"
+cache-duration: "168h"
+
+# 附件缓存（手机发图片用得上就留）
+attachment-cache-dir: "/var/cache/ntfy/attachments"
+
+# 访问控制：默认全拒，只放行账号（防陌生人猜 topic 偷听）
+auth-file: "/var/lib/ntfy/user.db"
+auth-default-access: "deny-all"
+enable-login: true
+
+# 在 Caddy 反代后面跑
+behind-proxy: true

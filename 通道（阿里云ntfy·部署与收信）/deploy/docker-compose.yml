@@ -1,0 +1,31 @@
+# 书签工具邮局 · 阿里云VPS部署（ntfy + Caddy）
+# 推荐 Docker 方案：升级回滚一条命令、官方镜像维护好、不用手管 systemd 和二进制。
+# 用法见同夹「部署手册（照着敲就上）.md」
+
+services:
+  ntfy:
+    image: binwiederhier/ntfy:v2.11.0   # 版本钉死，升级改这里再 up -d
+    container_name: ntfy
+    command: serve --config /etc/ntfy/server.yml
+    # 只听宿主回环：公网入口全部走 Caddy 的 443（HTTPS），2586 不暴露公网
+    ports:
+      - "127.0.0.1:2586:2586"
+    volumes:
+      - ./server.yml:/etc/ntfy/server.yml:ro
+      - ./cache:/var/cache/ntfy          # 消息缓存（SQLite）+ 附件
+      - ./auth:/var/lib/ntfy             # 账号库 user.db（ntfy user add 写这里）
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2
+    container_name: ntfy-caddy
+    ports:
+      - "80:80"      # 只为 ACME HTTP-01 验证
+      - "443:443"    # 公网 HTTPS 入口
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy-data:/data        # 证书落这里，换容器不重签
+      - ./caddy-config:/config
+    depends_on:
+      - ntfy
+    restart: unless-stopped

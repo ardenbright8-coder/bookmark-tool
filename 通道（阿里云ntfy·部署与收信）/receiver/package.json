@@ -1,0 +1,10 @@
+{
+  "name": "bookmark-channel-receiver",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "书签工具通道层·电脑端收信+回执模块（纯Node零依赖）",
+  "scripts": {
+    "test": "node --test"
+  }
+}
