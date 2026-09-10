@@ -9,6 +9,14 @@ vikunja/
 # 凭证（🚨永不上传）
 通道（阿里云ntfy·部署与收信）/deploy/服务器信息（本地·不进git）.md
 
+# 手机APP签名与凭证（🚨永不上传）
+手机APP_收发箱_Flutter/bookmark_inbox/android/key.properties
+*.jks
+手机APP_收发箱_Flutter/签名信息（本地·不进git）.md
+
+# 手机APP出包产物（APK二进制不进Git，落 release/ 留档）
+手机APP_收发箱_Flutter/release/
+
 # 运行产物
 node_modules/
 *.log

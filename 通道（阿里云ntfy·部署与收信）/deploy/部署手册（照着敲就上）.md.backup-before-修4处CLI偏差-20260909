@@ -38,16 +38,15 @@ docker compose logs --tail 20 ntfy   # 无红色报错
 ## 五、建两个账号（手机发信用 + 电脑收信用）
 
 ```bash
-# 手机端账号（只准发 up 主题）——ntfy 2.11 实测：不带 --config（容器默认就读它），密码用环境变量非交互设
-docker compose exec -T -e NTFY_PASSWORD=手机端密码 ntfy ntfy user add phone-sender
+# 手机端账号（只准发 up 主题）
+docker compose exec ntfy ntfy user add --config /etc/ntfy/server.yml phone-sender
 # 电脑端账号（收 up + 发回执）
-docker compose exec -T -e NTFY_PASSWORD=电脑端密码 ntfy ntfy user add pc-receiver
+docker compose exec ntfy ntfy user add --config /etc/ntfy/server.yml pc-receiver
 
 # 精确授权：up 主题手机只写、电脑读写；回执主题只电脑写（topic 名换成真值）
-# ——ntfy 2.11 实测：权限必须用全称 write-only / read-write，简写 w/rw 不认
-docker compose exec ntfy ntfy access phone-sender bookmark-up write-only
-docker compose exec ntfy ntfy access pc-receiver bookmark-up read-write
-docker compose exec ntfy ntfy access pc-receiver bookmark-receipt write-only
+docker compose exec ntfy ntfy access phone-sender bookmark-up w
+docker compose exec ntfy ntfy access pc-receiver bookmark-up rw
+docker compose exec ntfy ntfy access pc-receiver bookmark-receipt w
 ```
 
 把账号密码当场填进 `服务器信息（本地·不进git）.md`。
@@ -56,8 +55,7 @@ docker compose exec ntfy ntfy access pc-receiver bookmark-receipt write-only
 
 ```bash
 # 1. 外部连通（在本机 PowerShell 跑）：应回 {"id":"..."}
-# 当前上线的是 IP 直连 HTTP 版（HTTPS+域名二阶段再换），地址照实写
-curl http://116.62.217.189/ -u phone-sender:密码 -d "{\"topic\":\"bookmark-up\",\"message\":\"上线测试\"}" -H "Title: 上线"
+curl https://你的真域名/ -u phone-sender:密码 -d "{\"topic\":\"bookmark-up\",\"message\":\"上线测试\"}" -H "Title: 上线"
 
 # 2. 收流（另开一个终端）：上一条消息应在几秒内流出来
 curl -s "https://你的真域名/bookmark-up/json?poll=1&since=10m" -u pc-receiver:密码
