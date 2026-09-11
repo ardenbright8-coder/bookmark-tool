@@ -2,6 +2,10 @@
 
 书签工具的手机端：单页「Agent 看板」——💭待定区置顶 + 按 agent 分组（⊕无限加组/加任务），记一条推到阿里云 ntfy 邮局，电脑端收信进看板并回「已收录」。消息 JSON：`{"type":"note|bookmark|task","content","assignee","ts"}`，`cmd` 类型收到只存不执行（云 Agent 留口）。
 
+## 硬规矩（用户拍板，违反=返工）
+
+- 🚨 **手机端不加项目文件夹功能；待定区和Agent分组保持现有形态**（用户原话 · 2026-09-10）。电脑端的 📁 项目文件夹不往手机搬；💭待定区置顶 + 按 agent 分组的单页形态不许改。
+
 ## 三层架构（改代码前先看）
 
 - `lib/core/` —— **通道核心**（config / ledger 账本 / models / notifier / ntfy_client / receipt_sync 回执 / sender 发送器）。🚫 禁 import 任何 widget——这套将来整体搬去别的项目
@@ -45,6 +49,7 @@ APP 右上角齿轮 → 设置页填 ntfy 地址 + 账号密码（server 上：�
 
 ## 升级路线（第一版没做的，别偷偷加）
 
+- 📁 项目文件夹：电脑端功能，手机端明确不加（2026-09-10 拍板，见上「硬规矩」）
 - 云 Agent `cmd` 指令：收到只存不执行 → 将来接执行器
 - 真机后台收信：`flutter_foreground_task` 前台服务 + OriginOS 白名单（现在打开 APP 才收，够用）
 - iOS：Flutter 代码 90% 复用，等 Mac + 苹果账号；上架方案未定（留白）
