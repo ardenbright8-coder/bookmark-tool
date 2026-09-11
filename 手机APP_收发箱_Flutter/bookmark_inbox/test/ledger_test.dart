@@ -81,4 +81,65 @@ void main() {
     await store.deleteEntry(id);
     expect(await store.byId(id), isNull);
   });
+
+  test('attachments 落库再读回，updateAttachments 只改文件名列表', () async {
+    final id = await store.insertPending(LedgerEntry(
+      type: MsgType.note,
+      content: '带图',
+      assignee: 'Pi',
+      ts: DateTime.now().millisecondsSinceEpoch,
+      dedupeKey: 'img-1',
+      attachments: ['a.jpg', 'b.png'],
+    ));
+    expect((await store.byId(id))!.attachments, ['a.jpg', 'b.png']);
+    await store.updateAttachments(id, ['b.png']);
+    final e = (await store.byId(id))!;
+    expect(e.attachments, ['b.png']);
+    expect(e.content, '带图');
+    expect(e.dedupeKey, 'img-1');
+  });
+
+  test('旧库 version1 升级后能读写 attachments', () async {
+    final tmp = await Directory.systemTemp.createTemp('ledger_mig');
+    final path = '${tmp.path}/bookmark_inbox.db';
+    final old = await databaseFactory.openDatabase(
+      path,
+      options: OpenDatabaseOptions(
+        version: 1,
+        onCreate: (d, v) => d.execute('''
+        CREATE TABLE entries(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          type TEXT NOT NULL,
+          content TEXT NOT NULL,
+          assignee TEXT NOT NULL DEFAULT '',
+          ts INTEGER NOT NULL,
+          dedupeKey TEXT NOT NULL UNIQUE,
+          status INTEGER NOT NULL DEFAULT 0,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          lastError TEXT NOT NULL DEFAULT ''
+        )
+      '''),
+      ),
+    );
+    await old.insert('entries', {
+      'type': 'note',
+      'content': '旧行',
+      'assignee': '',
+      'ts': 1,
+      'dedupeKey': 'legacy',
+      'status': 0,
+      'attempts': 0,
+      'lastError': '',
+    });
+    await old.close();
+
+    final upgraded = LedgerStore(factory: databaseFactory);
+    await upgraded.open(tmp.path);
+    final row = (await upgraded.entries()).single;
+    expect(row.content, '旧行');
+    expect(row.attachments, isEmpty);
+    await upgraded.updateAttachments(row.id!, ['new.jpg']);
+    expect((await upgraded.byId(row.id!))!.attachments, ['new.jpg']);
+    await upgraded.close();
+  });
 }

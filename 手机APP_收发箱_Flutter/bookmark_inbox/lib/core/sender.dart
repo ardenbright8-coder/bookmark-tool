@@ -19,10 +19,12 @@ class Sender {
   final Future<ChannelConfig> Function() configLoader;
 
   /// 组一条新记录并发送。返回账本 id。
+  /// [attachments] 只收文件名；图不进 JSON、不走邮局。
   Future<int> composeAndSend({
     MsgType type = MsgType.note,
     required String content,
     String assignee = '',
+    List<String> attachments = const [],
   }) async {
     final entry = LedgerEntry(
       type: type,
@@ -30,6 +32,7 @@ class Sender {
       assignee: assignee,
       ts: DateTime.now().millisecondsSinceEpoch,
       dedupeKey: _newDedupeKey(),
+      attachments: attachments,
     );
     final id = await store.insertPending(entry);
     await _attempt(id);

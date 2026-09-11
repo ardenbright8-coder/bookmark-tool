@@ -3,6 +3,7 @@
 // 谁看: 改 sender.dart 的人
 // 改之前必看: 只测逻辑，不连真邮局
 // ---
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -72,6 +73,25 @@ void main() {
     final e = (await store.byId(id))!;
     expect(e.status, SendStatus.pending);
     expect(e.lastError, contains('未配置'));
+  });
+
+  test('发送 JSON 带 attachments 文件名，不带路径、不带图字节', () async {
+    String? message;
+    final client = MockClient((req) async {
+      final body = jsonDecode(req.body) as Map<String, dynamic>;
+      message = body['message'] as String;
+      return http.Response('{"id":"srv1"}', 200);
+    });
+    await makeSender(client).composeAndSend(
+      content: '看图',
+      attachments: ['shot.jpg', r'/sdcard/DCIM/nope.png'],
+    );
+    final payload = jsonDecode(message!) as Map<String, dynamic>;
+    expect(payload['content'], '看图');
+    expect(payload['attachments'], ['shot.jpg', 'nope.png']);
+    expect(message!.contains('/sdcard'), false);
+    expect(message!.contains('base64'), false);
+    expect(message!.length, lessThan(500));
   });
 
   test('retryPending：待发的逐条尝试，成功转 sent', () async {

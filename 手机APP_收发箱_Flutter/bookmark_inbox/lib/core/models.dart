@@ -2,7 +2,8 @@
 // 这是啥: 账本条目模型 + 业务消息 JSON 编解码（手机↔电脑唯一协议）
 // 谁看: 通道核心各件与界面都经它
 // 什么时候用: 构造/解析上行消息、读写账本行时
-// 改之前必看: 电脑端收信模块把原消息原样回发当回执，dedupeKey 是两端匹配键，别改名
+// 改之前必看: 电脑端收信模块把原消息原样回发当回执，dedupeKey 是两端匹配键，别改名；
+//   attachments 只存文件名（不含路径），图不进 JSON、不上传邮局
 // ---
 import 'dart:convert';
 
@@ -18,6 +19,37 @@ enum SendStatus { pending, sent, confirmed }
 SendStatus statusFrom(int v) =>
     SendStatus.values.firstWhere((e) => e.index == v, orElse: () => SendStatus.pending);
 
+/// 协议约定：附件只记文件名。剥掉路径/穿越，空或 `.`/`..` 丢弃。
+String attachmentFileName(String raw) {
+  var t = raw.trim().replaceAll('\\', '/');
+  final i = t.lastIndexOf('/');
+  if (i >= 0) t = t.substring(i + 1);
+  if (t.isEmpty || t == '.' || t == '..') return '';
+  return t;
+}
+
+/// 从 JSON 数组或账本 TEXT 列解析附件文件名列表。垃圾输入给空列表，不抛。
+List<String> attachmentNamesFrom(Object? raw) {
+  if (raw == null) return const [];
+  Object? v = raw;
+  if (v is String) {
+    if (v.isEmpty) return const [];
+    try {
+      v = jsonDecode(v);
+    } catch (_) {
+      return const [];
+    }
+  }
+  if (v is! List) return const [];
+  final out = <String>[];
+  for (final e in v) {
+    if (e is! String) continue;
+    final name = attachmentFileName(e);
+    if (name.isNotEmpty) out.add(name);
+  }
+  return out;
+}
+
 /// 本地账本一行（一条上行记录）
 class LedgerEntry {
   LedgerEntry({
@@ -30,7 +62,8 @@ class LedgerEntry {
     this.status = SendStatus.pending,
     this.attempts = 0,
     this.lastError = '',
-  });
+    List<String> attachments = const [],
+  }) : attachments = attachmentNamesFrom(attachments);
 
   final int? id;
   MsgType type;
@@ -41,6 +74,7 @@ class LedgerEntry {
   SendStatus status;
   int attempts;
   String lastError;
+  List<String> attachments;
 
   /// 上行业务 JSON（放进 ntfy message 字段的载荷）
   String encodePayload() => jsonEncode({
@@ -50,6 +84,7 @@ class LedgerEntry {
         'assignee': assignee,
         'ts': ts,
         'dedupeKey': dedupeKey,
+        'attachments': attachments,
       });
 
   /// 解析收到的业务 JSON（回执里用它取 dedupeKey）。垃圾数据返回 null，不抛。
@@ -66,6 +101,7 @@ class LedgerEntry {
         'assignee': m['assignee'] is String ? m['assignee'] as String : '',
         'ts': m['ts'] is int ? m['ts'] as int : 0,
         'dedupeKey': m['dedupeKey'] as String,
+        'attachments': attachmentNamesFrom(m['attachments']),
       };
     } catch (_) {
       return null;
@@ -82,6 +118,7 @@ class LedgerEntry {
         'status': status.index,
         'attempts': attempts,
         'lastError': lastError,
+        'attachments': jsonEncode(attachments),
       };
 
   factory LedgerEntry.fromRow(Map<String, Object?> row) => LedgerEntry(
@@ -94,5 +131,6 @@ class LedgerEntry {
         status: statusFrom(row['status'] as int? ?? 0),
         attempts: row['attempts'] as int? ?? 0,
         lastError: row['lastError'] as String? ?? '',
+        attachments: attachmentNamesFrom(row['attachments']),
       );
 }

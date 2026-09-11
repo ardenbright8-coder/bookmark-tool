@@ -1,6 +1,6 @@
 # bookmark_inbox · 书签收发箱（手机端）
 
-书签工具的手机端：单页「Agent 看板」——💭待定区置顶 + 按 agent 分组（⊕无限加组/加任务），记一条推到阿里云 ntfy 邮局，电脑端收信进看板并回「已收录」。消息 JSON：`{"type":"note|bookmark|task","content","assignee","ts"}`，`cmd` 类型收到只存不执行（云 Agent 留口）。
+书签工具的手机端：单页「Agent 看板」——💭待定区置顶 + 按 agent 分组（⊕无限加组/加任务），记一条推到阿里云 ntfy 邮局，电脑端收信进看板并回「已收录」。消息 JSON：`{"type":"note|bookmark|task","content","assignee","ts","attachments"}`（`attachments` 为文件名数组，可空；图只存在手机 `attachments/` 目录，不上传邮局）。`cmd` 类型收到只存不执行（云 Agent 留口）。
 
 ## 硬规矩（用户拍板，违反=返工）
 

@@ -10,6 +10,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 
+import 'core/attachment_store.dart';
 import 'core/ledger.dart';
 import 'core/notifier.dart';
 import 'core/ntfy_client.dart';
@@ -21,6 +22,7 @@ import 'ui/agent_board_page.dart';
 late final LedgerStore gStore;
 late final Sender gSender;
 late final ReceiptSync gReceiptSync;
+late final AttachmentStore gAttachments;
 final Notifier gNotifier = Notifier();
 
 Future<void> main() async {
@@ -69,6 +71,8 @@ class _ShellState extends State<Shell> {
     try {
       gStore = LedgerStore();
       final dir = await getApplicationDocumentsDirectory();
+      gAttachments = AttachmentStore(rootDir: dir.path);
+      await gAttachments.ensureReady();
       await gStore.open(dir.path);
       gSender = Sender(store: gStore, client: NtfyClient(), configLoader: _loadCfg);
       gReceiptSync = ReceiptSync(store: gStore, client: gSender.client);
@@ -111,6 +115,7 @@ class _ShellState extends State<Shell> {
       store: gStore,
       sender: gSender,
       receiptSync: gReceiptSync,
+      attachments: gAttachments,
       revision: _revision,
       onChanged: _bump,
     );

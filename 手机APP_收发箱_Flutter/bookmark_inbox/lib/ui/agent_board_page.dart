@@ -6,14 +6,19 @@
 //   组头⊕加任务（弹窗）、折叠箭头只折 UI 不动数据；长按条目=移动分组/删除；
 //   任务行右侧不放任何按钮（用户拍板：自动同步无需手动确认）
 // ---
-import 'package:flutter/material.dart';
+import 'dart:async';
 
+import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
+
+import '../core/attachment_store.dart';
 import '../core/config.dart';
 import '../core/ledger.dart';
 import '../core/models.dart';
 import '../core/receipt_sync.dart';
 import '../core/sender.dart';
 import 'agents_roster.dart';
+import 'attachment_views.dart';
 import 'settings_dialog.dart';
 
 const _pendingKey = '__pending__';
@@ -24,6 +29,7 @@ class AgentBoardPage extends StatefulWidget {
     required this.store,
     required this.sender,
     required this.receiptSync,
+    required this.attachments,
     required this.revision,
     required this.onChanged,
   });
@@ -31,6 +37,7 @@ class AgentBoardPage extends StatefulWidget {
   final LedgerStore store;
   final Sender sender;
   final ReceiptSync receiptSync;
+  final AttachmentStore attachments;
   final int revision; // main 侧数据版本号，变了就重拉
   final VoidCallback onChanged;
 
@@ -99,19 +106,15 @@ class _AgentBoardPageState extends State<AgentBoardPage> {
   }
 
   Future<void> _quickAdd(String assignee) async {
-    final typeContent = await showDialog<(MsgType, String)>(
+    final ok = await showDialog<bool>(
       context: context,
       builder: (_) => _QuickTaskDialog(
             assignee: assignee,
             sender: widget.sender,
+            attachments: widget.attachments,
           ),
     );
-    if (typeContent == null) return;
-    await widget.sender.composeAndSend(
-      type: typeContent.$1,
-      content: typeContent.$2,
-      assignee: assignee,
-    );
+    if (ok != true) return;
     setState(() => _collapsed.remove(assignee.isEmpty ? _pendingKey : assignee));
     widget.onChanged();
     await _reload();
@@ -186,12 +189,25 @@ class _AgentBoardPageState extends State<AgentBoardPage> {
     );
     if (choice == null) return;
     if (choice.$1 == '__delete__') {
+      await widget.attachments.deleteNamed(e.attachments);
       await widget.store.deleteEntry(e.id!);
     } else {
       final assignee = choice.$1 == _pendingKey ? '' : choice.$1;
       await widget.store.updateAssignee(e.id!, assignee);
     }
     widget.onChanged();
+    await _reload();
+  }
+
+  Future<void> _openDetail(LedgerEntry e) async {
+    await showDialog<void>(
+      context: context,
+      builder: (_) => _EntryDetailDialog(
+        entry: e,
+        store: widget.store,
+        attachments: widget.attachments,
+      ),
+    );
     await _reload();
   }
 
@@ -310,6 +326,7 @@ class _AgentBoardPageState extends State<AgentBoardPage> {
     final mm = dt.minute.toString().padLeft(2, '0');
     return InkWell(
       borderRadius: BorderRadius.circular(16),
+      onTap: () => _openDetail(e),
       onLongPress: () => _moveEntry(e),
       child: Container(
         margin: const EdgeInsets.fromLTRB(10, 4, 10, 4),
@@ -340,6 +357,14 @@ class _AgentBoardPageState extends State<AgentBoardPage> {
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(height: 1.25),
                   ),
+                  if (e.attachments.isNotEmpty) ...[
+                    const SizedBox(height: 6),
+                    AttachmentThumbStrip(
+                      store: widget.attachments,
+                      names: e.attachments,
+                      size: 40,
+                    ),
+                  ],
                   const SizedBox(height: 3),
                   Text(
                     '$label · $hh:$mm'
@@ -391,10 +416,15 @@ class _AgentBoardPageState extends State<AgentBoardPage> {
 
 /// 组头⊕弹的快速加任务窗：类型三选（默认任务），发送走 Sender（先落账本）
 class _QuickTaskDialog extends StatefulWidget {
-  const _QuickTaskDialog({required this.assignee, required this.sender});
+  const _QuickTaskDialog({
+    required this.assignee,
+    required this.sender,
+    required this.attachments,
+  });
 
   final String assignee; // 空串=待定组
   final Sender sender;
+  final AttachmentStore attachments;
 
   @override
   State<_QuickTaskDialog> createState() => _QuickTaskDialogState();
@@ -404,11 +434,33 @@ class _QuickTaskDialogState extends State<_QuickTaskDialog> {
   final _ctrl = TextEditingController();
   MsgType _type = MsgType.task;
   bool _sending = false;
+  bool _committed = false;
+  final List<String> _names = [];
+  String? _pickError;
 
   @override
   void dispose() {
     _ctrl.dispose();
+    if (!_committed && _names.isNotEmpty) {
+      unawaited(widget.attachments.deleteNamed(List<String>.from(_names)));
+    }
     super.dispose();
+  }
+
+  Future<void> _pick(ImageSource source) async {
+    try {
+      final added = await pickAndImportImages(
+        store: widget.attachments,
+        source: source,
+      );
+      if (!mounted || added.isEmpty) return;
+      setState(() {
+        _names.addAll(added);
+        _pickError = null;
+      });
+    } catch (e) {
+      if (mounted) setState(() => _pickError = '选图失败：$e');
+    }
   }
 
   Future<void> _send() async {
@@ -416,9 +468,14 @@ class _QuickTaskDialogState extends State<_QuickTaskDialog> {
     if (text.isEmpty || _sending) return;
     setState(() => _sending = true);
     try {
+      _committed = true;
       await widget.sender.composeAndSend(
-          type: _type, content: text, assignee: widget.assignee);
-      if (mounted) Navigator.of(context).pop((MsgType.task, text));
+        type: _type,
+        content: text,
+        assignee: widget.assignee,
+        attachments: List<String>.from(_names),
+      );
+      if (mounted) Navigator.of(context).pop(true);
     } finally {
       if (mounted) setState(() => _sending = false);
     }
@@ -426,37 +483,188 @@ class _QuickTaskDialogState extends State<_QuickTaskDialog> {
 
   @override
   Widget build(BuildContext context) {
-    return AlertDialog(
+    return PopScope(
+      canPop: !_sending,
+      child: AlertDialog(
       title: Text(widget.assignee.isEmpty ? '💭 待定 · 记一条' : '给 ${widget.assignee} 加任务'),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          SegmentedButton<MsgType>(
-            segments: const [
-              ButtonSegment(value: MsgType.task, label: Text('任务')),
-              ButtonSegment(value: MsgType.note, label: Text('随手记')),
-              ButtonSegment(value: MsgType.bookmark, label: Text('网址')),
-            ],
-            selected: {_type},
-            onSelectionChanged: (s) => setState(() => _type = s.first),
-          ),
-          const SizedBox(height: 12),
-          TextField(
-            controller: _ctrl,
-            maxLines: 3,
-            autofocus: true,
-            decoration: const InputDecoration(
-                hintText: '内容……', border: OutlineInputBorder()),
-          ),
-        ],
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SegmentedButton<MsgType>(
+              segments: const [
+                ButtonSegment(value: MsgType.task, label: Text('任务')),
+                ButtonSegment(value: MsgType.note, label: Text('随手记')),
+                ButtonSegment(value: MsgType.bookmark, label: Text('网址')),
+              ],
+              selected: {_type},
+              onSelectionChanged: (s) => setState(() => _type = s.first),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _ctrl,
+              maxLines: 3,
+              autofocus: true,
+              decoration: const InputDecoration(
+                  hintText: '内容……', border: OutlineInputBorder()),
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                TextButton.icon(
+                  onPressed: _sending ? null : () => _pick(ImageSource.gallery),
+                  icon: const Icon(Icons.photo_library_outlined),
+                  label: const Text('相册'),
+                ),
+                TextButton.icon(
+                  onPressed: _sending ? null : () => _pick(ImageSource.camera),
+                  icon: const Icon(Icons.photo_camera_outlined),
+                  label: const Text('拍照'),
+                ),
+              ],
+            ),
+            AttachmentThumbStrip(
+              store: widget.attachments,
+              names: _names,
+              size: 56,
+              onRemove: _sending
+                  ? null
+                  : (n) {
+                      setState(() => _names.remove(n));
+                      unawaited(widget.attachments.deleteNamed([n]));
+                    },
+            ),
+            if (_pickError != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Text(_pickError!,
+                    style: const TextStyle(color: Colors.redAccent, fontSize: 12)),
+              ),
+          ],
+        ),
       ),
       actions: [
         TextButton(
-            onPressed: () => Navigator.of(context).pop(),
+            onPressed: _sending ? null : () => Navigator.of(context).pop(),
             child: const Text('取消')),
         FilledButton(
             onPressed: _sending ? null : _send,
             child: Text(_sending ? '发送中' : '记下并送出')),
+      ],
+    ),
+    );
+  }
+}
+
+/// 点条目看详情：全文 + 本地图（可再贴/去掉）。改图只动手机本地，不重发邮局。
+class _EntryDetailDialog extends StatefulWidget {
+  const _EntryDetailDialog({
+    required this.entry,
+    required this.store,
+    required this.attachments,
+  });
+
+  final LedgerEntry entry;
+  final LedgerStore store;
+  final AttachmentStore attachments;
+
+  @override
+  State<_EntryDetailDialog> createState() => _EntryDetailDialogState();
+}
+
+class _EntryDetailDialogState extends State<_EntryDetailDialog> {
+  late List<String> _names;
+  String? _pickError;
+  bool _busy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _names = List<String>.from(widget.entry.attachments);
+  }
+
+  Future<void> _persist(List<String> next) async {
+    await widget.store.updateAttachments(widget.entry.id!, next);
+    if (mounted) setState(() => _names = next);
+  }
+
+  Future<void> _pick(ImageSource source) async {
+    if (_busy || widget.entry.id == null) return;
+    setState(() => _busy = true);
+    try {
+      final added = await pickAndImportImages(
+        store: widget.attachments,
+        source: source,
+      );
+      if (added.isEmpty) return;
+      await _persist([..._names, ...added]);
+      if (mounted) setState(() => _pickError = null);
+    } catch (e) {
+      if (mounted) setState(() => _pickError = '选图失败：$e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _remove(String name) async {
+    if (_busy || widget.entry.id == null) return;
+    setState(() => _busy = true);
+    try {
+      await widget.attachments.deleteNamed([name]);
+      await _persist(_names.where((n) => n != name).toList());
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('条目'),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SelectableText(widget.entry.content, style: const TextStyle(height: 1.35)),
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                TextButton.icon(
+                  onPressed: _busy ? null : () => _pick(ImageSource.gallery),
+                  icon: const Icon(Icons.photo_library_outlined),
+                  label: const Text('相册'),
+                ),
+                TextButton.icon(
+                  onPressed: _busy ? null : () => _pick(ImageSource.camera),
+                  icon: const Icon(Icons.photo_camera_outlined),
+                  label: const Text('拍照'),
+                ),
+              ],
+            ),
+            AttachmentThumbStrip(
+              store: widget.attachments,
+              names: _names,
+              size: 72,
+              onRemove: _busy ? null : _remove,
+            ),
+            if (_names.isEmpty)
+              Text('还没有图。相册或拍照贴上，只存在这台手机。',
+                  style: TextStyle(color: Colors.grey.shade600, fontSize: 12)),
+            if (_pickError != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Text(_pickError!,
+                    style: const TextStyle(color: Colors.redAccent, fontSize: 12)),
+              ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('关闭')),
       ],
     );
   }

@@ -2,11 +2,29 @@
 // 这是啥: 本地账本（sqflite）——每条记录先落这里再发送，永不丢
 // 谁看: sender（落库/改状态）、界面账本页（列表）、receipt_sync（回执确认）
 // 什么时候用: 一切对账本的读写
-// 改之前必看: dedupeKey 唯一，重复插入会被静默忽略；status 语义见 SendStatus
+// 改之前必看: dedupeKey 唯一，重复插入会被静默忽略；status 语义见 SendStatus；
+//   v2 加 attachments TEXT（JSON 数组，只存文件名），旧库 onUpgrade 补列，别把 version 撤回 1
 // ---
+import 'dart:convert';
+
 import 'package:sqflite/sqflite.dart';
 
 import 'models.dart';
+
+const _createSql = '''
+        CREATE TABLE entries(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          type TEXT NOT NULL,
+          content TEXT NOT NULL,
+          assignee TEXT NOT NULL DEFAULT '',
+          ts INTEGER NOT NULL,
+          dedupeKey TEXT NOT NULL UNIQUE,
+          status INTEGER NOT NULL DEFAULT 0,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          lastError TEXT NOT NULL DEFAULT '',
+          attachments TEXT NOT NULL DEFAULT '[]'
+        )
+      ''';
 
 class LedgerStore {
   LedgerStore({this.factory});
@@ -20,20 +38,15 @@ class LedgerStore {
     _db = await (factory ?? databaseFactory).openDatabase(
       '$dir/bookmark_inbox.db',
       options: OpenDatabaseOptions(
-        version: 1,
-        onCreate: (d, v) => d.execute('''
-        CREATE TABLE entries(
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          type TEXT NOT NULL,
-          content TEXT NOT NULL,
-          assignee TEXT NOT NULL DEFAULT '',
-          ts INTEGER NOT NULL,
-          dedupeKey TEXT NOT NULL UNIQUE,
-          status INTEGER NOT NULL DEFAULT 0,
-          attempts INTEGER NOT NULL DEFAULT 0,
-          lastError TEXT NOT NULL DEFAULT ''
-        )
-      '''),
+        version: 2,
+        onCreate: (d, v) => d.execute(_createSql),
+        onUpgrade: (d, old, neu) async {
+          if (old < 2) {
+            await d.execute(
+              "ALTER TABLE entries ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]'",
+            );
+          }
+        },
       ),
     );
   }
@@ -105,5 +118,15 @@ class LedgerStore {
   Future<void> updateAssignee(int id, String assignee) async {
     await db.update('entries', {'assignee': assignee},
         where: 'id = ?', whereArgs: [id]);
+  }
+
+  /// 改本地附件文件名列表（本期图不重新上传邮局）。
+  Future<void> updateAttachments(int id, List<String> names) async {
+    await db.update(
+      'entries',
+      {'attachments': jsonEncode(attachmentNamesFrom(names))},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
   }
 }

@@ -40,4 +40,34 @@ void main() {
     expect(statusFrom(2), SendStatus.confirmed);
     expect(statusFrom(99), SendStatus.pending);
   });
+
+  test('encodePayload 带 attachments 文件名；路径被剥掉；无图给空数组', () {
+    final withImg = LedgerEntry(
+      type: MsgType.note,
+      content: '看这张',
+      ts: 1,
+      dedupeKey: 'k1',
+      attachments: ['shot.jpg', r'C:\tmp\other.png', ''],
+    );
+    final payload = LedgerEntry.tryDecodePayload(withImg.encodePayload())!;
+    expect(payload['attachments'], ['shot.jpg', 'other.png']);
+    expect(withImg.encodePayload().contains('C:'), false);
+
+    final plain = LedgerEntry(
+      type: MsgType.note,
+      content: '纯文字',
+      ts: 1,
+      dedupeKey: 'k2',
+    );
+    expect(LedgerEntry.tryDecodePayload(plain.encodePayload())!['attachments'], isEmpty);
+  });
+
+  test('tryDecodePayload：缺 attachments 的老回执仍能解', () {
+    final payload = LedgerEntry.tryDecodePayload(
+      '{"type":"note","content":"x","assignee":"","ts":1,"dedupeKey":"old-1"}',
+    );
+    expect(payload, isNotNull);
+    expect(payload!['dedupeKey'], 'old-1');
+    expect(payload['attachments'], isEmpty);
+  });
 }
