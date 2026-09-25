@@ -4,6 +4,7 @@
 // 什么时候用: 每次发送与重试
 // 改之前必看: 先落库后发送是「消息永不丢」的根基，顺序别倒；网络异常一律记 lastError 不抛
 // ---
+import 'dart:convert';
 import 'dart:math';
 
 import 'ledger.dart';
@@ -70,6 +71,31 @@ class Sender {
     } else {
       await store.markFailed(id, r.error ?? '未知错误');
     }
+  }
+
+  /// 手机上挪组 / 删条（设定19）：发一条 type=op 的命令到上行主题，电脑收信时照做。
+  /// [assignee] 空＝挪回待定。命令不进本地账本（看板以电脑为准，下一份整板就能看到结果）；发不出去返回 false，不抛。
+  Future<bool> sendOp({required String op, required String id, String assignee = ''}) async {
+    final cfg = await configLoader();
+    if (!cfg.isConfigured) return false;
+    final r = await client.publish(
+      server: cfg.server,
+      topic: cfg.upTopic,
+      user: cfg.user.isEmpty ? null : cfg.user,
+      pass: cfg.pass.isEmpty ? null : cfg.pass,
+      title: op == 'delete' ? '删一条' : '挪一条',
+      message: jsonEncode({
+        'v': 1,
+        'type': 'op',
+        'op': op,
+        'id': id,
+        'assignee': assignee,
+        'ts': DateTime.now().millisecondsSinceEpoch,
+        'dedupeKey': _newDedupeKey(),
+      }),
+      tags: const ['bookmark_tabs'],
+    );
+    return r.ok;
   }
 
   static String _newDedupeKey() {

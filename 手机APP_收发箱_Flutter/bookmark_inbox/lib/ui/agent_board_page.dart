@@ -1,10 +1,12 @@
 // ---
-// 这是啥: Agent 看板主页——单页按 agent 分组展示全部条目（用户拍板的正式形态）
+// 这是啥: Agent 看板主页——照电脑看板的样子：单页，💭待定置顶、下面按 agent 分组，每组第一格是空白框，条目 01 02 编号
 // 谁看: main 的唯一 home
 // 什么时候用: 打开 APP 即看板
-// 改之前必看: 分组事实=条目 assignee 字段（空=💭待定置顶）；名单只是展示顺序；
-//   组头⊕加任务（弹窗）、折叠箭头只折 UI 不动数据；长按条目=移动分组/删除；
-//   任务行右侧不放任何按钮（用户拍板：自动同步无需手动确认）
+// 改之前必看: 看板以电脑为准（设定19）：打开、下拉、每 30 秒拉一份电脑发到中转站的整板（board_sync.dart），
+//   手机只把「自己发了、看板上还没有的」单列出来标「等电脑收」；挪组 / 删条 / 早上审完「可以，删掉」
+//   都是发命令给电脑（sender.sendOp），电脑照做后下一份整板就变了，手机先照着改好（乐观更新）。
+//   用户拍板：待定置顶 + 按 agent 分组的单页形态不许改、不加项目文件夹（2026-09-10）；不放数数的小标、组框不折叠（设定13）；
+//   分组名单以电脑为准，手机不加组（加组去电脑看板）。
 // ---
 import 'dart:async';
 
@@ -12,6 +14,7 @@ import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../core/attachment_store.dart';
+import '../core/board_sync.dart';
 import '../core/config.dart';
 import '../core/ledger.dart';
 import '../core/models.dart';
@@ -21,7 +24,11 @@ import 'agents_roster.dart';
 import 'attachment_views.dart';
 import 'settings_dialog.dart';
 
-const _pendingKey = '__pending__';
+// 草木皮肤（跟电脑看板同一套颜色）
+const _ink = Color(0xFF2F3E2C);
+const _leaf = Color(0xFF7A9C5E);
+const _leafDark = Color(0xFF4D6B3A);
+const _muted = Color(0x8C2F3E2C);
 
 class AgentBoardPage extends StatefulWidget {
   const AgentBoardPage({
@@ -45,17 +52,42 @@ class AgentBoardPage extends StatefulWidget {
   State<AgentBoardPage> createState() => _AgentBoardPageState();
 }
 
+/// 看板上一组：key 是组名（待定 = ''，交接单专区 = _handoffKey）
+class _Group {
+  _Group(this.key, this.name, this.items, this.mine);
+  final String key;
+  final String name;
+  final List<BoardItem> items;
+  final List<LedgerEntry> mine; // 自己发的、看板上还没有的
+}
+
+const _handoffKey = '__handoff__';
+
 class _AgentBoardPageState extends State<AgentBoardPage> {
   List<LedgerEntry> _entries = [];
-  List<String> _agents = [];
-  final Set<String> _collapsed = {};
+  List<String> _fallbackAgents = [];
+  BoardSnapshot? _snap;
+  bool _syncing = false;
   int _lastRevision = -1;
-  final AgentRoster _roster = AgentRoster();
+  Timer? _poll;
+  late final BoardSync _boardSync = BoardSync(client: widget.sender.client);
+  // 发了命令、电脑还没抄新的一份：先照着改好（乐观更新），新整板到了就清掉
+  final Set<String> _hidden = {};
+  Set<String> _seen = {};
+  final Map<String, String> _moved = {};
 
   @override
   void initState() {
     super.initState();
     _reload();
+    unawaited(_refreshAll());
+    _poll = Timer.periodic(const Duration(seconds: 30), (_) => unawaited(_pullBoard()));
+  }
+
+  @override
+  void dispose() {
+    _poll?.cancel();
+    super.dispose();
   }
 
   @override
@@ -67,354 +99,577 @@ class _AgentBoardPageState extends State<AgentBoardPage> {
   Future<void> _reload() async {
     _lastRevision = widget.revision;
     final entries = await widget.store.entries();
-    final agents = await _roster.load();
+    final agents = await AgentRoster().load();
     if (mounted) {
       setState(() {
         _entries = entries;
-        _agents = agents;
+        _fallbackAgents = agents;
       });
     }
   }
 
-  /// 分组：💭待定置顶 → 名单顺序 → 名单外老数据归入「其他」
-  List<(String key, String name, List<LedgerEntry> items)> _groups() {
-    final groups = <(String, String, List<LedgerEntry>)>[];
-    groups.add((
-      _pendingKey,
-      '待定（想想区）',
-      _entries.where((e) => e.assignee.isEmpty).toList(),
-    ));
-    for (final a in _agents) {
-      groups.add((a, a, _entries.where((e) => e.assignee == a).toList()));
+  Future<void> _pullBoard() async {
+    final snap = await _boardSync.fetch(await ChannelConfig.load());
+    final seen = await BoardSync.seenKeys();
+    if (!mounted || snap == null) return;
+    setState(() {
+      _seen = seen;
+      if (_snap == null || snap.ts != _snap!.ts) {
+        _hidden.clear();
+        _moved.clear();
+      }
+      _snap = snap;
+    });
+  }
+
+  /// 弹菜单、刷新之前先把光标从空白框里拿出来：菜单一关 Flutter 会把光标还回去，键盘就自己弹出来了
+  void _dropFocus() => FocusManager.instance.primaryFocus?.unfocus();
+
+  Future<void> _refreshAll() async {
+    _dropFocus();
+    if (_syncing) return;
+    setState(() => _syncing = true);
+    try {
+      final cfg = await ChannelConfig.load();
+      await widget.sender.retryPending();
+      await widget.receiptSync.sync(cfg);
+      await _pullBoard();
+      await _reload();
+    } finally {
+      if (mounted) setState(() => _syncing = false);
     }
-    final known = <String>{'', ..._agents};
-    final extras = _entries
-        .map((e) => e.assignee)
-        .where((a) => a.isNotEmpty && !known.contains(a))
-        .toSet();
+  }
+
+  List<String> get _agents => _snap?.agents.isNotEmpty == true ? _snap!.agents : _fallbackAgents;
+
+  String _assigneeOf(BoardItem i) => _moved[i.id] ?? i.assignee ?? '';
+
+  /// 分组（单页）：💭待定置顶 → 名单顺序 → 名单外的老组 → 最底下交接单专区
+  List<_Group> _groups() {
+    final items = (_snap?.items ?? const <BoardItem>[]).where((i) => !_hidden.contains(i.id)).toList();
+    final mine = notOnBoardYet(_entries, _snap, seen: _seen);
+    bool same(String a, String b) => a.toLowerCase() == b.toLowerCase();
+    final groups = <_Group>[
+      _Group('', '待定（想想区）', items.where((i) => _assigneeOf(i).isEmpty && !i.isHandoff).toList(),
+          mine.where((e) => e.assignee.isEmpty).toList()),
+      for (final a in _agents)
+        _Group(a, a, items.where((i) => same(_assigneeOf(i), a)).toList(),
+            mine.where((e) => same(e.assignee, a)).toList()),
+    ];
+    final known = _agents.map((a) => a.toLowerCase()).toSet();
+    final extras = {
+      ...items.map(_assigneeOf),
+      ...mine.map((e) => e.assignee),
+    }.where((a) => a.isNotEmpty && !known.contains(a.toLowerCase()));
     for (final a in extras) {
-      groups.add((a, a, _entries.where((e) => e.assignee == a).toList()));
+      groups.add(_Group(a, a, items.where((i) => _assigneeOf(i) == a).toList(),
+          mine.where((e) => e.assignee == a).toList()));
     }
+    groups.add(_Group(_handoffKey, '交接单（AI 干完活留下的）',
+        items.where((i) => _assigneeOf(i).isEmpty && i.isHandoff).toList(), const []));
     return groups;
   }
 
-  Future<void> _refreshAll() async {
-    final cfg = await ChannelConfig.load();
-    await widget.sender.retryPending();
-    await widget.receiptSync.sync(cfg);
-    await _reload();
-  }
+  // ── 记一条 / 挪 / 删 ──
 
-  Future<void> _quickAdd(String assignee) async {
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (_) => _QuickTaskDialog(
-            assignee: assignee,
-            sender: widget.sender,
-            attachments: widget.attachments,
-          ),
-    );
-    if (ok != true) return;
-    setState(() => _collapsed.remove(assignee.isEmpty ? _pendingKey : assignee));
+  Future<void> _write(String assignee, String text) async {
+    final t = text.trim();
+    if (t.isEmpty) return;
+    await widget.sender.composeAndSend(type: MsgType.task, content: t, assignee: assignee);
     widget.onChanged();
     await _reload();
   }
 
-  Future<void> _addAgent() async {
-    final name = await showDialog<String>(
+  Future<void> _writeWithImage(String assignee) async {
+    final ok = await showDialog<bool>(
       context: context,
-      builder: (_) {
-        final ctrl = TextEditingController();
-        return AlertDialog(
-          title: const Text('添加分组'),
-          content: TextField(
-            controller: ctrl,
-            autofocus: true,
-            decoration: const InputDecoration(
-                labelText: 'Agent 名称', hintText: '如 Codex、Gemini……'),
-            onSubmitted: (v) => Navigator.of(context).pop(v.trim()),
-          ),
-          actions: [
-            TextButton(
-                onPressed: () => Navigator.of(context).pop(),
-                child: const Text('取消')),
-            FilledButton(
-                onPressed: () => Navigator.of(context).pop(ctrl.text.trim()),
-                child: const Text('添加')),
-          ],
-        );
-      },
+      builder: (_) => _QuickTaskDialog(assignee: assignee, sender: widget.sender, attachments: widget.attachments),
     );
-    if (name == null || name.isEmpty) return;
-    if (_agents.contains(name)) return;
-    final next = [..._agents, name];
-    await _roster.save(next);
+    if (ok != true) return;
+    widget.onChanged();
     await _reload();
   }
 
-  Future<void> _moveEntry(LedgerEntry e) async {
-    final targets = <(String, String)>[
-      (_pendingKey, '💭 待定（想想区）'),
-      ..._agents.map((a) => (a, a)),
-      if (e.assignee.isNotEmpty && !_agents.contains(e.assignee))
-        (e.assignee, e.assignee),
-    ];
-    final choice = await showModalBottomSheet<(String, String)>(
+  void _toast(String text) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(text), duration: const Duration(seconds: 3)));
+  }
+
+  Future<void> _sendOp(BoardItem item, {required String op, String assignee = ''}) async {
+    _dropFocus();
+    final ok = await widget.sender.sendOp(op: op, id: item.id, assignee: assignee);
+    if (!mounted) return;
+    if (!ok) {
+      _toast('没发出去（网不通？），电脑那边没动，等会儿再试');
+      return;
+    }
+    setState(() => op == 'delete' ? _hidden.add(item.id) : _moved[item.id] = assignee);
+    _toast(op == 'delete' ? '已让电脑删掉这条' : '已让电脑挪到 ${assignee.isEmpty ? '待定' : assignee}');
+  }
+
+  Future<void> _itemMenu(BoardItem item) async {
+    _dropFocus();
+    final here = _assigneeOf(item);
+    final targets = ['', ..._agents].where((a) => a.toLowerCase() != here.toLowerCase()).toList();
+    final choice = await showModalBottomSheet<String>(
       context: context,
       builder: (ctx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
+        child: SingleChildScrollView(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
             const Padding(
               padding: EdgeInsets.all(12),
-              child: Text('移动到……', style: TextStyle(fontWeight: FontWeight.bold)),
+              child: Text('挪到……', style: TextStyle(fontWeight: FontWeight.bold)),
             ),
-            for (final (key, name) in targets)
-              if (key != (e.assignee.isEmpty ? _pendingKey : e.assignee))
-                ListTile(
-                  dense: true,
-                  leading: const Icon(Icons.drive_file_move_outlined),
-                  title: Text(name),
-                  onTap: () => Navigator.of(ctx).pop((key, name)),
-                ),
+            for (final a in targets)
+              ListTile(
+                dense: true,
+                leading: _GroupLogo(name: a, size: 20),
+                title: Text(a.isEmpty ? '待定' : a),
+                onTap: () => Navigator.of(ctx).pop('to:$a'),
+              ),
             const Divider(height: 1),
             ListTile(
               leading: const Icon(Icons.delete_outline, color: Colors.redAccent),
-              title: const Text('删除记录', style: TextStyle(color: Colors.redAccent)),
-              onTap: () => Navigator.of(ctx).pop(('__delete__', '')),
+              title: const Text('删掉这条', style: TextStyle(color: Colors.redAccent)),
+              onTap: () => Navigator.of(ctx).pop('delete'),
             ),
-          ],
+          ]),
         ),
       ),
     );
     if (choice == null) return;
-    if (choice.$1 == '__delete__') {
-      await widget.attachments.deleteNamed(e.attachments);
-      await widget.store.deleteEntry(e.id!);
+    if (choice == 'delete') {
+      await _sendOp(item, op: 'delete');
     } else {
-      final assignee = choice.$1 == _pendingKey ? '' : choice.$1;
-      await widget.store.updateAssignee(e.id!, assignee);
+      await _sendOp(item, op: 'assign', assignee: choice.substring(3));
     }
+  }
+
+  Future<void> _mineMenu(LedgerEntry e) async {
+    _dropFocus();
+    final del = await showModalBottomSheet<bool>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          const Padding(
+            padding: EdgeInsets.all(12),
+            child: Text('这条电脑还没收到', style: TextStyle(fontWeight: FontWeight.bold)),
+          ),
+          ListTile(
+            leading: const Icon(Icons.delete_outline, color: Colors.redAccent),
+            title: const Text('从手机上删掉（没发出去的就不发了）', style: TextStyle(color: Colors.redAccent)),
+            onTap: () => Navigator.of(ctx).pop(true),
+          ),
+        ]),
+      ),
+    );
+    if (del != true) return;
+    await widget.attachments.deleteNamed(e.attachments);
+    await widget.store.deleteEntry(e.id!);
     widget.onChanged();
     await _reload();
   }
 
-  Future<void> _openDetail(LedgerEntry e) async {
-    await showDialog<void>(
+  Future<void> _openItem(BoardItem item) async {
+    _dropFocus();
+    await showModalBottomSheet<void>(
       context: context,
-      builder: (_) => _EntryDetailDialog(
-        entry: e,
-        store: widget.store,
-        attachments: widget.attachments,
+      isScrollControlled: true,
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
+          child: SingleChildScrollView(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              if (item.isHandoff) const Text('📋 交接单', style: TextStyle(color: _leafDark, fontWeight: FontWeight.w600)),
+              SelectableText(displayText(item.text), style: const TextStyle(height: 1.4, fontSize: 15, color: _ink)),
+              if (item.detail != null) ...[
+                const SizedBox(height: 10),
+                SelectableText(item.detail!, style: const TextStyle(height: 1.4, color: _ink)),
+              ],
+              if (item.url != null) ...[
+                const SizedBox(height: 8),
+                SelectableText(item.url!, style: const TextStyle(color: _leafDark)),
+              ],
+              if (item.images > 0) ...[
+                const SizedBox(height: 8),
+                Text('🖼 有 ${item.images} 张图在电脑上（图不上传中转站）', style: const TextStyle(color: _muted, fontSize: 12)),
+              ],
+            ]),
+          ),
+        ),
       ),
     );
-    await _reload();
   }
+
+  // ── 画面 ──
 
   @override
   Widget build(BuildContext context) {
     final groups = _groups();
     return Scaffold(
-      backgroundColor: const Color(0xFFF3F4EA),
-      appBar: AppBar(
-        backgroundColor: Colors.transparent,
-        title: const Row(children: [
-          Icon(Icons.wb_sunny_outlined, size: 22),
-          SizedBox(width: 8),
-          Text('Agent 看板', style: TextStyle(fontWeight: FontWeight.w600)),
-        ]),
-        actions: [
-          IconButton(
-            tooltip: '邮局设置',
-            icon: const Icon(Icons.settings_outlined),
-            onPressed: () => showDialog(
-                context: context, builder: (_) => const SettingsDialog()),
-          ),
-        ],
-      ),
-      body: RefreshIndicator(
-        onRefresh: _refreshAll,
-        child: ListView.builder(
-          padding: const EdgeInsets.fromLTRB(12, 4, 12, 24),
-          itemCount: groups.length + 1,
-          itemBuilder: (context, i) {
-            if (i == groups.length) return _addAgentTile();
-            final (key, name, items) = groups[i];
-            return _groupCard(key, name, items);
-          },
-        ),
-      ),
-    );
-  }
-
-  Widget _addAgentTile() {
-    return Padding(
-      padding: const EdgeInsets.only(top: 4),
-      child: OutlinedButton.icon(
-        onPressed: _addAgent,
-        icon: const Icon(Icons.add),
-        label: const Text('添加分组'),
-      ),
-    );
-  }
-
-  Widget _groupCard(String key, String name, List<LedgerEntry> items) {
-    final collapsed = _collapsed.contains(key);
-    final isPending = key == _pendingKey;
-    return Card(
-      margin: const EdgeInsets.symmetric(vertical: 6),
-      elevation: 0,
-      color: Colors.white.withValues(alpha: 0.72),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
-      child: Column(
-        children: [
-          ListTile(
-            contentPadding: const EdgeInsets.fromLTRB(16, 6, 10, 6),
-            leading: _avatar(name, isPending),
-            title: Text(name, style: const TextStyle(fontWeight: FontWeight.w600)),
-            onTap: () => setState(() => _toggle(key)),
-            trailing: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                IconButton(
-                  tooltip: isPending ? '记一条待定' : '给 $name 加任务',
-                  icon: const Icon(Icons.add_circle_outline),
-                  onPressed: () => _quickAdd(isPending ? '' : key),
-                ),
-                IconButton(
-                  tooltip: collapsed ? '展开' : '折叠',
-                  icon: Icon(collapsed
-                      ? Icons.keyboard_arrow_right
-                      : Icons.keyboard_arrow_down),
-                  onPressed: () => setState(() => _toggle(key)),
-                ),
-              ],
-            ),
-          ),
-          if (!collapsed) ...[
-            if (items.isEmpty)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(20, 0, 20, 14),
-                child: Align(
-                  alignment: Alignment.centerLeft,
-                  child: Text(isPending ? '想到啥先扔这，想好给谁再移过去。' : '这组还没有任务。',
-                      style: TextStyle(color: Colors.grey.shade500, fontSize: 12)),
-                ),
-              )
-            else
-              for (var i = 0; i < items.length; i++)
-                _taskRow(items[i], i),
-            const SizedBox(height: 6),
-          ],
-        ],
-      ),
-    );
-  }
-
-  void _toggle(String key) {
-    _collapsed.contains(key) ? _collapsed.remove(key) : _collapsed.add(key);
-  }
-
-  Widget _taskRow(LedgerEntry e, int index) {
-    final (color, label) = switch (e.status) {
-      SendStatus.confirmed => (const Color(0xFF6E9E6E), '电脑已收录'),
-      SendStatus.sent => (const Color(0xFF7FA6C2), '已送出·待回执'),
-      SendStatus.pending => (const Color(0xFFD29B4B), '待发送'),
-    };
-    final dt = DateTime.fromMillisecondsSinceEpoch(e.ts);
-    final hh = dt.hour.toString().padLeft(2, '0');
-    final mm = dt.minute.toString().padLeft(2, '0');
-    return InkWell(
-      borderRadius: BorderRadius.circular(16),
-      onTap: () => _openDetail(e),
-      onLongPress: () => _moveEntry(e),
-      child: Container(
-        margin: const EdgeInsets.fromLTRB(10, 4, 10, 4),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        decoration: BoxDecoration(
-          color: Colors.white.withValues(alpha: 0.85),
-          borderRadius: BorderRadius.circular(16),
-        ),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Padding(
-              padding: const EdgeInsets.only(top: 2),
-              child: Text(
-                (index + 1).toString().padLeft(2, '0'),
-                style: TextStyle(
-                    fontWeight: FontWeight.w600, color: Colors.grey.shade700),
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    e.content,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(height: 1.25),
-                  ),
-                  if (e.attachments.isNotEmpty) ...[
-                    const SizedBox(height: 6),
-                    AttachmentThumbStrip(
-                      store: widget.attachments,
-                      names: e.attachments,
-                      size: 40,
-                    ),
-                  ],
-                  const SizedBox(height: 3),
-                  Text(
-                    '$label · $hh:$mm'
-                    '${e.status == SendStatus.pending && e.attempts > 0 ? '（失败${e.attempts}次）' : ''}'
-                    '${e.lastError.isEmpty ? '' : ' · ${e.lastError}'}',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(color: color, fontSize: 11),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _avatar(String name, bool isPending) {
-    if (isPending) {
-      return Container(
-        width: 40,
-        height: 40,
-        alignment: Alignment.center,
+      body: Container(
         decoration: const BoxDecoration(
-            shape: BoxShape.circle, color: Color(0xFFE7E9D8)),
-        child: const Text('💭', style: TextStyle(fontSize: 18)),
-      );
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [Color(0xFFF5F8EE), Color(0xFFE2ECD5)],
+          ),
+        ),
+        child: SafeArea(
+          child: Column(children: [
+            _titleBar(),
+            Expanded(
+              child: RefreshIndicator(
+                onRefresh: _refreshAll,
+                child: ListView(
+                  padding: const EdgeInsets.fromLTRB(10, 4, 10, 28),
+                  children: [
+                    if (_snap == null) _noBoardHint(),
+                    for (final g in groups) _groupCard(g),
+                  ],
+                ),
+              ),
+            ),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  Widget _titleBar() {
+    final snap = _snap;
+    String when = '还没拉到电脑的看板';
+    if (snap != null) {
+      final t = DateTime.fromMillisecondsSinceEpoch(snap.ts);
+      final hm = '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
+      final today = DateTime.now();
+      final sameDay = t.year == today.year && t.month == today.month && t.day == today.day;
+      when = '电脑 ${sameDay ? '' : '${t.month}/${t.day} '}$hm 的看板';
     }
-    const palette = [
-      [Color(0xFFF0C987), Color(0xFFE0A94B)],
-      [Color(0xFF9CC29C), Color(0xFF6E9E6E)],
-      [Color(0xFFA8C5D8), Color(0xFF7FA6C2)],
-      [Color(0xFFD8B4C0), Color(0xFFC291A5)],
-      [Color(0xFFC9B6E4), Color(0xFFA78BD4)],
-    ];
-    final c = palette[name.hashCode.abs() % palette.length];
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(14, 8, 4, 4),
+      child: Row(children: [
+        const Text('🌿', style: TextStyle(fontSize: 18)),
+        const SizedBox(width: 6),
+        const Text('Agent 看板', style: TextStyle(fontSize: 19, fontWeight: FontWeight.w700, color: _ink)),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(_syncing ? '同步中…' : when,
+              maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 11, color: _muted)),
+        ),
+        if (snap != null)
+          Tooltip(
+            message: '在电脑看板上切换',
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+              decoration: BoxDecoration(
+                color: snap.sleep ? const Color(0xFF2F3B52) : Colors.white.withValues(alpha: 0.6),
+                border: Border.all(color: snap.sleep ? const Color(0xFF2F3B52) : _leaf.withValues(alpha: 0.5)),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Text(snap.sleep ? '🌙 睡觉档' : '☀️ 日常档',
+                  style: TextStyle(fontSize: 11, color: snap.sleep ? const Color(0xFFF1E7C4) : _leafDark)),
+            ),
+          ),
+        IconButton(
+          tooltip: '邮局设置',
+          icon: const Icon(Icons.settings_outlined, color: _leafDark, size: 20),
+          onPressed: () => showDialog(context: context, builder: (_) => const SettingsDialog()),
+        ),
+      ]),
+    );
+  }
+
+  Widget _noBoardHint() => Container(
+        margin: const EdgeInsets.fromLTRB(2, 2, 2, 8),
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: const Color(0xFFFFF8E6),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: const Text('还没拉到电脑那边的看板：电脑开着看板才会发过来。下面先只列手机自己发过的。往下拉可以再试一次。',
+            style: TextStyle(fontSize: 12, color: _ink, height: 1.4)),
+      );
+
+  Widget _groupCard(_Group g) {
+    final isHandoff = g.key == _handoffKey;
+    var n = 0;
     return Container(
-      width: 40,
-      height: 40,
+      margin: const EdgeInsets.symmetric(vertical: 5),
+      padding: const EdgeInsets.fromLTRB(8, 8, 8, 8),
       decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        gradient: LinearGradient(
-            colors: c, begin: Alignment.topLeft, end: Alignment.bottomRight),
+        color: Colors.white.withValues(alpha: 0.55),
+        border: Border.all(color: _leaf.withValues(alpha: 0.22)),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(4, 0, 4, 6),
+          child: Row(children: [
+            _GroupLogo(name: g.key == _handoffKey ? '📋' : g.key, size: 22),
+            const SizedBox(width: 8),
+            Flexible(
+              child: Text(g.name, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: _ink)),
+            ),
+          ]),
+        ),
+        if (!isHandoff) _BlankBox(onSubmit: (t) => _write(g.key, t), onImage: () => _writeWithImage(g.key)),
+        for (final e in g.mine) _mineRow(e),
+        for (final item in g.items) _itemRow(item, ++n),
+        if (isHandoff && g.items.isEmpty)
+          const Padding(
+            padding: EdgeInsets.fromLTRB(8, 0, 8, 4),
+            child: Text('AI 干完活留下的交接单在这里。', style: TextStyle(fontSize: 12, color: _muted)),
+          ),
+      ]),
+    );
+  }
+
+  Widget _rowShell({required Widget child, VoidCallback? onTap, VoidCallback? onLongPress}) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 2),
+        child: Material(
+          color: Colors.white.withValues(alpha: 0.8),
+          borderRadius: BorderRadius.circular(10),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(10),
+            onTap: onTap,
+            onLongPress: onLongPress,
+            child: Padding(padding: const EdgeInsets.fromLTRB(10, 8, 10, 8), child: child),
+          ),
+        ),
+      );
+
+  Widget _itemRow(BoardItem item, int order) {
+    return _rowShell(
+      onTap: () => _openItem(item),
+      onLongPress: () => _itemMenu(item),
+      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        SizedBox(
+          width: 24,
+          child: Text(order.toString().padLeft(2, '0'), style: const TextStyle(color: _muted, fontSize: 13, height: 1.5)),
+        ),
+        Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(displayText(item.text),
+                maxLines: 3, overflow: TextOverflow.ellipsis, style: const TextStyle(color: _ink, fontSize: 14.5, height: 1.4)),
+            if (item.isHandoff || item.claimedBy != null || item.images > 0)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Wrap(spacing: 6, runSpacing: 4, children: [
+                  if (item.isHandoff) const _Chip('📋 交接单'),
+                  if (item.claimedBy != null) _Chip('🔄 ${item.claimedBy} 在干'),
+                  if (item.images > 0) _Chip('🖼 ${item.images}'),
+                ]),
+              ),
+            if (item.report != null) _reportBlock(item),
+          ]),
+        ),
+      ]),
+    );
+  }
+
+  Widget _reportBlock(BoardItem item) {
+    var when = '';
+    final at = item.reportedAt == null ? null : DateTime.tryParse(item.reportedAt!)?.toLocal();
+    if (at != null) when = ' · ${at.hour.toString().padLeft(2, '0')}:${at.minute.toString().padLeft(2, '0')}';
+    return Container(
+      margin: const EdgeInsets.only(top: 6),
+      padding: const EdgeInsets.fromLTRB(10, 6, 8, 6),
+      decoration: BoxDecoration(
+        color: _leaf.withValues(alpha: 0.12),
+        border: const Border(left: BorderSide(color: _leaf, width: 3)),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text('✅ 干完待审 · ${item.reportedBy ?? ''}$when',
+            style: const TextStyle(color: _leafDark, fontWeight: FontWeight.w600, fontSize: 13)),
+        const SizedBox(height: 2),
+        Text(item.report!, style: const TextStyle(color: _ink, fontSize: 13, height: 1.4)),
+        const SizedBox(height: 4),
+        OutlinedButton(
+          style: OutlinedButton.styleFrom(
+            visualDensity: VisualDensity.compact,
+            foregroundColor: _leafDark,
+            side: BorderSide(color: _leaf.withValues(alpha: 0.6)),
+          ),
+          onPressed: () => _sendOp(item, op: 'delete'),
+          child: const Text('可以，删掉'),
+        ),
+      ]),
+    );
+  }
+
+  Widget _mineRow(LedgerEntry e) {
+    final (color, label) = switch (e.status) {
+      SendStatus.confirmed => (_leafDark, '📨 电脑已收，等下一份看板'),
+      SendStatus.sent => (const Color(0xFF5E86A8), '⏳ 已送出，等电脑收'),
+      SendStatus.pending => (const Color(0xFFB07A2E), '⏳ 还没发出去${e.attempts > 0 ? '（失败 ${e.attempts} 次，下拉重试）' : ''}'),
+    };
+    return _rowShell(
+      onTap: () => showDialog<void>(
+        context: context,
+        builder: (_) => _EntryDetailDialog(entry: e, store: widget.store, attachments: widget.attachments),
+      ).then((_) => _reload()),
+      onLongPress: () => _mineMenu(e),
+      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const SizedBox(width: 24, child: Text('··', style: TextStyle(color: _muted, fontSize: 13, height: 1.5))),
+        Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(e.content, maxLines: 3, overflow: TextOverflow.ellipsis, style: const TextStyle(color: _ink, fontSize: 14.5, height: 1.4)),
+            if (e.attachments.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: AttachmentThumbStrip(store: widget.attachments, names: e.attachments, size: 36),
+              ),
+            Padding(
+              padding: const EdgeInsets.only(top: 3),
+              child: Text(label, style: TextStyle(color: color, fontSize: 11)),
+            ),
+          ]),
+        ),
+      ]),
+    );
+  }
+}
+
+/// 每组第一格的常驻空白框（跟电脑设定17一样）：点进去就写，回车就发、框清空、光标留着接着写；右边小图标＝带图记一条
+class _BlankBox extends StatefulWidget {
+  const _BlankBox({required this.onSubmit, required this.onImage});
+  final Future<void> Function(String text) onSubmit;
+  final VoidCallback onImage;
+
+  @override
+  State<_BlankBox> createState() => _BlankBoxState();
+}
+
+class _BlankBoxState extends State<_BlankBox> {
+  final _ctrl = TextEditingController();
+  final _focus = FocusNode();
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    _focus.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    final text = _ctrl.text.replaceAll('\n', ' ');
+    _ctrl.clear();
+    _focus.requestFocus();
+    if (text.trim().isEmpty) return;
+    await widget.onSubmit(text);
+  }
+
+  /// 回车＝记下这条（跟电脑看板一样）：多行框里敲回车会塞进一个换行，见到换行就当回车
+  void _onChanged(String value) {
+    if (value.contains('\n')) unawaited(_submit());
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: TextField(
+        controller: _ctrl,
+        focusNode: _focus,
+        minLines: 1,
+        maxLines: 4,
+        textInputAction: TextInputAction.send,
+        onSubmitted: (_) => _submit(),
+        onChanged: _onChanged,
+        style: const TextStyle(fontSize: 14.5, color: _ink),
+        decoration: InputDecoration(
+          isDense: true,
+          hintText: '写一条…',
+          hintStyle: TextStyle(color: _ink.withValues(alpha: 0.35)),
+          filled: true,
+          fillColor: Colors.white.withValues(alpha: 0.35),
+          contentPadding: const EdgeInsets.fromLTRB(10, 9, 4, 9),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(10),
+            borderSide: BorderSide(color: _ink.withValues(alpha: 0.16)),
+          ),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(10),
+            borderSide: BorderSide(color: _ink.withValues(alpha: 0.16)),
+          ),
+          focusedBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(10),
+            borderSide: BorderSide(color: _leaf.withValues(alpha: 0.7)),
+          ),
+          suffixIcon: IconButton(
+            tooltip: '带图记一条',
+            icon: Icon(Icons.image_outlined, color: _leafDark.withValues(alpha: 0.55), size: 20),
+            onPressed: widget.onImage,
+          ),
+        ),
       ),
     );
   }
 }
 
-/// 组头⊕弹的快速加任务窗：类型三选（默认任务），发送走 Sender（先落账本）
+class _Chip extends StatelessWidget {
+  const _Chip(this.text);
+  final String text;
+
+  @override
+  Widget build(BuildContext context) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 1),
+        decoration: BoxDecoration(color: _leaf.withValues(alpha: 0.14), borderRadius: BorderRadius.circular(8)),
+        child: Text(text, style: const TextStyle(fontSize: 11.5, color: _leafDark)),
+      );
+}
+
+/// 组名前的标志：照电脑看板那五家的样子，认不出的组是叶形圆点
+class _GroupLogo extends StatelessWidget {
+  const _GroupLogo({required this.name, this.size = 22});
+  final String name;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    final n = name.toLowerCase();
+    Widget glyph(String t, Color c, {double scale = 1}) =>
+        Text(t, style: TextStyle(fontSize: size * scale, color: c, height: 1, fontWeight: FontWeight.w700));
+    Widget child;
+    if (name.isEmpty) {
+      child = glyph('💭', _ink, scale: 0.85);
+    } else if (name == '📋') {
+      child = glyph('📋', _ink, scale: 0.85);
+    } else if (n.contains('claude')) {
+      child = Icon(Icons.flare, size: size, color: const Color(0xFFD97757)); // ✳ 在安卓上会变成绿色表情，改用图标
+    } else if (n.contains('chatgpt') || n.contains('codex') || n.contains('openai')) {
+      child = glyph('◎', _ink);
+    } else if (n == 'pi' || n.startsWith('pi ')) {
+      final s = size / 2.2;
+      Widget sq(Color c) => Container(width: s, height: s, color: c);
+      child = Column(mainAxisSize: MainAxisSize.min, children: [
+        Row(mainAxisSize: MainAxisSize.min, children: [sq(const Color(0xFFF09082)), sq(const Color(0xFFF09082))]),
+        Row(mainAxisSize: MainAxisSize.min, children: [sq(const Color(0xFF4D9ABF)), sq(const Color(0xFFF1BE58))]),
+      ]);
+    } else if (n.contains('antigravity')) {
+      child = ShaderMask(
+        shaderCallback: (r) => const LinearGradient(
+          colors: [Color(0xFF4285F4), Color(0xFF34A853), Color(0xFFFBBC05), Color(0xFFEA4335)],
+        ).createShader(r),
+        child: glyph('Λ', Colors.white),
+      );
+    } else if (n.contains('hermes')) {
+      child = glyph('⚕', const Color(0xFF3D5A2C));
+    } else {
+      child = Container(
+        width: size * 0.55,
+        height: size * 0.55,
+        decoration: const BoxDecoration(color: _leaf, shape: BoxShape.circle),
+      );
+    }
+    return SizedBox(width: size, height: size, child: Center(child: child));
+  }
+}
+
+/// 空白框右边小图标弹的带图记一条窗：类型三选（默认任务），发送走 Sender（先落账本）
 class _QuickTaskDialog extends StatefulWidget {
   const _QuickTaskDialog({
     required this.assignee,

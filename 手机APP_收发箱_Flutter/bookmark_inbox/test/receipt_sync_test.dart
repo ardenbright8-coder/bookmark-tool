@@ -87,6 +87,8 @@ class _Cfg implements ChannelConfig {
   @override
   String get receiptTopic => 'bookmark-receipt';
   @override
+  String get boardTopic => 'bookmark-board';
+  @override
   bool get isConfigured => true;
 }
 

@@ -13,7 +13,7 @@ void main() {
   test('没存过=默认四家；存了读回原样', () async {
     SharedPreferences.setMockInitialValues({});
     final roster = AgentRoster();
-    expect(await roster.load(), ['Claude', 'ChatGPT', 'Pi Agent', 'Hermes']);
+    expect(await roster.load(), ['Claude', 'ChatGPT', 'Pi Agent', 'Antigravity', 'Hermes']);
 
     await roster.save(['Claude', 'Codex']);
     expect(await roster.load(), ['Claude', 'Codex']);

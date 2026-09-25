@@ -7,6 +7,8 @@ listen-http: ":2586"
 # 消息缓存：SQLite 落盘，168h=7天（要更长改这里，如 720h=30天；改了同步更新手册）
 cache-file: "/var/cache/ntfy/cache.db"
 cache-duration: "168h"
+# 2026-09-24：看板整板快照发给手机（设定19），长语音条目多了超过默认 4K，放到 256K
+message-size-limit: "256K"
 
 # 附件缓存（手机发图片用得上就留）
 attachment-cache-dir: "/var/cache/ntfy/attachments"

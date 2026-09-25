@@ -15,6 +15,7 @@ class ChannelConfig {
     required this.pass,
     required this.upTopic,
     required this.receiptTopic,
+    this.boardTopic = 'bookmark-board',
   });
 
   /// 默认邮局占位（部署实录见通道区）。换服务器/上HTTPS时改这里或设置页。
@@ -27,6 +28,9 @@ class ChannelConfig {
   final String upTopic;
   final String receiptTopic;
 
+  /// 电脑发整板的主题（设定19，电脑只写、手机只读），设置页不露，要改在这里改默认
+  final String boardTopic;
+
   bool get isConfigured => server.trim().isNotEmpty;
 
   static const _kServer = 'cfg.server';
@@ -34,6 +38,7 @@ class ChannelConfig {
   static const _kPass = 'cfg.pass';
   static const _kUp = 'cfg.upTopic';
   static const _kReceipt = 'cfg.receiptTopic';
+  static const _kBoard = 'cfg.boardTopic';
 
   static Future<ChannelConfig> load() async {
     final p = await SharedPreferences.getInstance();
@@ -43,6 +48,7 @@ class ChannelConfig {
       pass: p.getString(_kPass) ?? '',
       upTopic: p.getString(_kUp) ?? 'bookmark-up',
       receiptTopic: p.getString(_kReceipt) ?? 'bookmark-receipt',
+      boardTopic: p.getString(_kBoard) ?? 'bookmark-board',
     );
   }
 

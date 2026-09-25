@@ -10,7 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 class AgentRoster {
   AgentRoster({this.defaultNames = _defaults});
 
-  static const _defaults = ['Claude', 'ChatGPT', 'Pi Agent', 'Hermes'];
+  static const _defaults = ['Claude', 'ChatGPT', 'Pi Agent', 'Antigravity', 'Hermes']; // 没拉到电脑看板时的兜底，跟电脑默认五组一样
   static const _kNames = 'board.agents';
 
   final List<String> defaultNames;
