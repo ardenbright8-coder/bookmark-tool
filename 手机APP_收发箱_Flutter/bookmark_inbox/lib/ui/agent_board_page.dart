@@ -1,17 +1,19 @@
 // ---
-// 这是啥: Agent 看板主页——照电脑看板的样子：单页，💭待定置顶、下面按 agent 分组，每组第一格是空白框，条目 01 02 编号
+// 这是啥: Agent 看板主页——照电脑看板的样子：三个页签「💭 待定 / 🤖 Agent 分组 / 📁 项目」，每组第一格是空白框，条目 01 02 编号
 // 谁看: main 的唯一 home
 // 什么时候用: 打开 APP 即看板
 // 改之前必看: 看板以电脑为准（设定19）：打开、下拉、每 30 秒拉一份电脑发到中转站的整板（board_sync.dart），
 //   手机只把「自己发了、看板上还没有的」单列出来标「等电脑收」；挪组 / 删条 / 早上审完「可以，删掉」
 //   都是发命令给电脑（sender.sendOp），电脑照做后下一份整板就变了，手机先照着改好（乐观更新）。
-//   用户拍板：待定置顶 + 按 agent 分组的单页形态不许改、不加项目文件夹（2026-09-10）；不放数数的小标、组框不折叠（设定13）；
+//   🚨 2026-09-25 用户拍板：跟电脑一样分三个页签（点页签或左右滑换页，记住上次停在哪页），推翻 09-10 的「单页不许改」；
+//   项目页只能看（夹和 md 内容跟整板一起来），不能建不能改。不放数数的小标、组框不折叠（设定13）；
 //   分组名单以电脑为准，手机不加组（加组去电脑看板）。
 // ---
 import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../core/attachment_store.dart';
 import '../core/board_sync.dart';
@@ -63,7 +65,10 @@ class _Group {
 
 const _handoffKey = '__handoff__';
 
-class _AgentBoardPageState extends State<AgentBoardPage> {
+class _AgentBoardPageState extends State<AgentBoardPage> with SingleTickerProviderStateMixin {
+  static const _kTab = 'board.tab';
+  late final TabController _tabs = TabController(length: 3, vsync: this, initialIndex: 1);
+  String _projPath = ''; // 项目页当前在哪个夹（根＝''）
   List<LedgerEntry> _entries = [];
   List<String> _fallbackAgents = [];
   BoardSnapshot? _snap;
@@ -82,11 +87,24 @@ class _AgentBoardPageState extends State<AgentBoardPage> {
     _reload();
     unawaited(_refreshAll());
     _poll = Timer.periodic(const Duration(seconds: 30), (_) => unawaited(_pullBoard()));
+    // 记住上次停在哪页，下次打开还在那页
+    unawaited(SharedPreferences.getInstance().then((p) {
+      final i = p.getInt(_kTab);
+      if (mounted && i != null && i >= 0 && i < 3) _tabs.index = i;
+    }));
+    _tabs.addListener(() {
+      _dropFocus();
+      if (_tabs.indexIsChanging) return;
+      final i = _tabs.index;
+      if (mounted) setState(() {}); // 返回键管不管项目页，跟着当前页签变
+      unawaited(SharedPreferences.getInstance().then((p) => p.setInt(_kTab, i)));
+    });
   }
 
   @override
   void dispose() {
     _poll?.cancel();
+    _tabs.dispose();
     super.dispose();
   }
 
@@ -307,7 +325,28 @@ class _AgentBoardPageState extends State<AgentBoardPage> {
   @override
   Widget build(BuildContext context) {
     final groups = _groups();
-    return Scaffold(
+    final pending = groups.first; // 待定永远排第一个
+    final agentGroups = groups.sublist(1);
+    Widget page(List<Widget> children) => _KeepAlive(
+          child: RefreshIndicator(
+            onRefresh: _refreshAll,
+            child: ListView(
+              physics: const AlwaysScrollableScrollPhysics(),
+              padding: const EdgeInsets.fromLTRB(10, 4, 10, 28),
+              children: [if (_snap == null) _noBoardHint(), ...children],
+            ),
+          ),
+        );
+    // 项目页点进了子夹：手机返回键＝回上一层，不退出应用（2026-09-25 模拟器上实测踩到）
+    final inSubFolder = _tabs.index == 2 && _projPath.isNotEmpty;
+    return PopScope(
+      canPop: !inSubFolder,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop || !inSubFolder) return;
+        final i = _projPath.lastIndexOf('/');
+        setState(() => _projPath = i < 0 ? '' : _projPath.substring(0, i));
+      },
+      child: Scaffold(
       body: Container(
         decoration: const BoxDecoration(
           gradient: LinearGradient(
@@ -319,23 +358,177 @@ class _AgentBoardPageState extends State<AgentBoardPage> {
         child: SafeArea(
           child: Column(children: [
             _titleBar(),
+            _tabBar(pending.items.length + pending.mine.length),
             Expanded(
-              child: RefreshIndicator(
-                onRefresh: _refreshAll,
-                child: ListView(
-                  padding: const EdgeInsets.fromLTRB(10, 4, 10, 28),
-                  children: [
-                    if (_snap == null) _noBoardHint(),
-                    for (final g in groups) _groupCard(g),
-                  ],
-                ),
-              ),
+              child: TabBarView(controller: _tabs, children: [
+                page([_groupCard(pending)]),
+                page([for (final g in agentGroups) _groupCard(g)]),
+                page(_projectPage()),
+              ]),
             ),
           ]),
         ),
       ),
+      ),
     );
   }
+
+  /// 三个页签，长相照电脑看板：圆角小胶囊，选中的那个是淡绿底；待定带条数（电脑上也带）
+  Widget _tabBar(int pendingCount) {
+    Widget tab(String icon, String label, {int? count}) => Tab(
+          height: 34,
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Text(icon, style: const TextStyle(fontSize: 15)),
+            const SizedBox(width: 5),
+            Text(label),
+            if (count != null && count > 0) ...[
+              const SizedBox(width: 5),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6),
+                decoration: BoxDecoration(color: Colors.white.withValues(alpha: 0.8), borderRadius: BorderRadius.circular(8)),
+                child: Text('$count', style: const TextStyle(fontSize: 11.5, color: _leafDark)),
+              ),
+            ],
+          ]),
+        );
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(10, 0, 10, 4),
+      child: TabBar(
+        controller: _tabs,
+        dividerColor: Colors.transparent,
+        indicatorSize: TabBarIndicatorSize.tab,
+        splashBorderRadius: BorderRadius.circular(17),
+        indicator: BoxDecoration(
+          color: _leaf.withValues(alpha: 0.28),
+          border: Border.all(color: _leaf.withValues(alpha: 0.55)),
+          borderRadius: BorderRadius.circular(17),
+        ),
+        labelPadding: const EdgeInsets.symmetric(horizontal: 4),
+        labelColor: _ink,
+        unselectedLabelColor: _ink.withValues(alpha: 0.6),
+        labelStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
+        unselectedLabelStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+        tabs: [
+          tab('💭', '待定', count: pendingCount),
+          tab('🤖', 'Agent 分组'),
+          tab('📁', '项目'),
+        ],
+      ),
+    );
+  }
+
+  // ── 项目页（只能看）：一层一层点进去，点 md 看内容 ──
+
+  List<Widget> _projectPage() {
+    final roots = _snap?.projects;
+    if (_snap != null && roots == null) {
+      return [_hint('电脑看板还是老版本，没把项目页发过来。电脑上按 Ctrl+R 换成新版就有了。')];
+    }
+    final all = roots ?? const <ProjectNode>[];
+    var here = projectChildrenAt(all, _projPath);
+    if (here == null) {
+      // 当前这个夹电脑上已经没了：退回最上面
+      _projPath = '';
+      here = all;
+    }
+    final crumbs = _projPath.isEmpty ? <String>[] : _projPath.split('/');
+    return [
+      Container(
+        margin: const EdgeInsets.symmetric(vertical: 5),
+        padding: const EdgeInsets.fromLTRB(8, 8, 8, 8),
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: 0.55),
+          border: Border.all(color: _leaf.withValues(alpha: 0.22)),
+          borderRadius: BorderRadius.circular(14),
+        ),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          // 路径：📁 项目 › 中医 › …，点哪一段回到哪一层
+          Padding(
+            padding: const EdgeInsets.fromLTRB(4, 0, 4, 6),
+            child: Wrap(crossAxisAlignment: WrapCrossAlignment.center, children: [
+              _crumb('📁 项目', ''),
+              for (var i = 0; i < crumbs.length; i++) ...[
+                const Text(' › ', style: TextStyle(color: _muted)),
+                _crumb(crumbs[i], crumbs.sublist(0, i + 1).join('/')),
+              ],
+            ]),
+          ),
+          if (here.isEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(8, 4, 8, 6),
+              child: Text(all.isEmpty ? '电脑上还没有项目夹。建夹、建文档去电脑看板的「📁 项目」页。' : '这个夹是空的。',
+                  style: const TextStyle(fontSize: 12, color: _muted)),
+            ),
+          for (final n in here) _projectRow(n),
+          const Padding(
+            padding: EdgeInsets.fromLTRB(8, 6, 8, 0),
+            child: Text('手机上只能看；建夹、写文档去电脑看板。', style: TextStyle(fontSize: 11, color: _muted)),
+          ),
+        ]),
+      ),
+    ];
+  }
+
+  Widget _crumb(String label, String path) {
+    final current = path == _projPath;
+    return InkWell(
+      borderRadius: BorderRadius.circular(6),
+      onTap: current ? null : () => setState(() => _projPath = path),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 2),
+        child: Text(label,
+            style: TextStyle(
+                fontSize: 15, fontWeight: current ? FontWeight.w700 : FontWeight.w500, color: current ? _ink : _leafDark)),
+      ),
+    );
+  }
+
+  Widget _projectRow(ProjectNode n) => _rowShell(
+        onTap: () => n.dir ? setState(() => _projPath = n.path) : _openDoc(n),
+        child: Row(children: [
+          Text(n.dir ? '📁' : '📄', style: const TextStyle(fontSize: 17)),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(n.name, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(color: _ink, fontSize: 14.5)),
+          ),
+          if (n.dir) const Icon(Icons.chevron_right, color: _muted, size: 20),
+        ]),
+      );
+
+  Future<void> _openDoc(ProjectNode n) async {
+    _dropFocus();
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) => SafeArea(
+        child: ConstrainedBox(
+          constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.85),
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text('📄 ${n.name}', style: const TextStyle(color: _leafDark, fontWeight: FontWeight.w700, fontSize: 15)),
+              const SizedBox(height: 10),
+              SelectableText(
+                n.content == null ? '（电脑那边没读到这份的内容）' : (n.content!.trim().isEmpty ? '（空文档）' : n.content!),
+                style: const TextStyle(height: 1.5, fontSize: 14.5, color: _ink),
+              ),
+              if (n.truncated) ...[
+                const SizedBox(height: 10),
+                const Text('…… 太长了，手机上只带了前面一截，全文去电脑上看。', style: TextStyle(color: _muted, fontSize: 12)),
+              ],
+            ]),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _hint(String text) => Container(
+        margin: const EdgeInsets.fromLTRB(2, 6, 2, 8),
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(color: const Color(0xFFFFF8E6), borderRadius: BorderRadius.circular(12)),
+        child: Text(text, style: const TextStyle(fontSize: 12, color: _ink, height: 1.4)),
+      );
 
   Widget _titleBar() {
     final snap = _snap;
@@ -607,6 +800,26 @@ class _BlankBoxState extends State<_BlankBox> {
         ),
       ),
     );
+  }
+}
+
+/// 页签换走时别把页面拆了：空白框里写了一半的字、翻到的位置都留着
+class _KeepAlive extends StatefulWidget {
+  const _KeepAlive({required this.child});
+  final Widget child;
+
+  @override
+  State<_KeepAlive> createState() => _KeepAliveState();
+}
+
+class _KeepAliveState extends State<_KeepAlive> with AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
+
+  @override
+  Widget build(BuildContext context) {
+    super.build(context);
+    return widget.child;
   }
 }
 

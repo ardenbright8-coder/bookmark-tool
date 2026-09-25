@@ -67,9 +67,55 @@ class BoardItem {
       );
 }
 
+/// 项目页的一个夹或一份 md（电脑 board-sync.ts 的 BoardProjectNode 同形）。手机只能看，不能建不能改（2026-09-25）。
+class ProjectNode {
+  ProjectNode({required this.name, required this.path, required this.dir, this.children = const [], this.content, this.truncated = false});
+
+  final String name;
+
+  /// 相对项目根的路径（正斜杠），进夹、回上一层都按它找
+  final String path;
+  final bool dir;
+  final List<ProjectNode> children;
+
+  /// md 全文（电脑读不到那份就是 null）
+  final String? content;
+
+  /// 太长只带了前面一截
+  final bool truncated;
+
+  static List<ProjectNode> listFrom(Object? raw) => raw is List
+      ? raw.whereType<Map>().where((m) => m['name'] is String && m['path'] is String).map((m) {
+          final dir = m['dir'] == true;
+          return ProjectNode(
+            name: m['name'] as String,
+            path: m['path'] as String,
+            dir: dir,
+            children: dir ? listFrom(m['children']) : const [],
+            content: m['content'] is String ? m['content'] as String : null,
+            truncated: m['truncated'] == true,
+          );
+        }).toList()
+      : const [];
+}
+
+/// 项目页里某个夹下面有什么（根＝''）。夹不在了（电脑上删了）给 null，页面就退回根。
+List<ProjectNode>? projectChildrenAt(List<ProjectNode> roots, String path) {
+  if (path.isEmpty) return roots;
+  var level = roots;
+  final parts = path.split('/');
+  for (var i = 0; i < parts.length; i++) {
+    final want = parts.sublist(0, i + 1).join('/');
+    final hit = level.where((n) => n.dir && n.path == want);
+    if (hit.isEmpty) return null;
+    level = hit.first.children;
+  }
+  return level;
+}
+
 /// 电脑发来的一整板
 class BoardSnapshot {
-  BoardSnapshot({required this.ts, required this.sleep, required this.agents, required this.items});
+  BoardSnapshot({required this.ts, required this.sleep, required this.agents, required this.items, this.projects});
 
   /// 电脑抄这一份的时间（毫秒）
   final int ts;
@@ -80,6 +126,9 @@ class BoardSnapshot {
 
   /// 看板顺序（每组里从上到下）
   final List<BoardItem> items;
+
+  /// 电脑看板「📁 项目」页；老版电脑不发这个字段＝null（页面提示去电脑更新）
+  final List<ProjectNode>? projects;
 
   /// 解析整板 JSON。不是整板、坏数据一律 null，不抛。
   static BoardSnapshot? tryParse(String raw) {
@@ -95,6 +144,7 @@ class BoardSnapshot {
             .where((e) => e['id'] is String)
             .map((e) => BoardItem.fromJson(Map<String, dynamic>.from(e)))
             .toList(),
+        projects: m.containsKey('projects') ? ProjectNode.listFrom(m['projects']) : null,
       );
     } catch (_) {
       return null;

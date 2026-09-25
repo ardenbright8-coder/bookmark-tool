@@ -170,4 +170,35 @@ void main() {
     expect(displayText('看这里[图片:image-1a.png]和这[图片:image-2.png]'), '看这里🖼和这🖼');
     expect(displayText('没有图'), '没有图');
   });
+
+  test('项目页：整板带 projects 就解析成一棵树；老电脑不带＝null；按路径找夹里有什么，夹没了给 null', () {
+    final raw = jsonEncode({
+      'type': 'board',
+      'ts': 1,
+      'items': [],
+      'projects': [
+        {
+          'name': '中医',
+          'path': '中医',
+          'dir': true,
+          'children': [
+            {'name': '设计思路.md', 'path': '中医/设计思路.md', 'dir': false, 'content': '先看舌苔'},
+            {'name': '方子', 'path': '中医/方子', 'dir': true, 'children': []},
+          ],
+        },
+        {'name': '长.md', 'path': '长.md', 'dir': false, 'content': '前半截', 'truncated': true},
+        {'name': '坏的'},
+      ],
+    });
+    final snap = BoardSnapshot.tryParse(raw)!;
+    final roots = snap.projects!;
+    expect(roots.map((n) => n.name).toList(), ['中医', '长.md']);
+    expect(roots[1].truncated, isTrue);
+    expect(projectChildrenAt(roots, '')!.length, 2);
+    expect(projectChildrenAt(roots, '中医')!.map((n) => n.name).toList(), ['设计思路.md', '方子']);
+    expect(projectChildrenAt(roots, '中医')!.first.content, '先看舌苔');
+    expect(projectChildrenAt(roots, '中医/方子'), isEmpty);
+    expect(projectChildrenAt(roots, '中医/不在了'), isNull);
+    expect(BoardSnapshot.tryParse(jsonEncode({'type': 'board', 'ts': 1, 'items': []}))!.projects, isNull);
+  });
 }
